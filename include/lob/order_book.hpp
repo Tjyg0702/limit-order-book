@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include "lob/trade.hpp"
 #include <vector>
 #include <optional>
@@ -15,6 +16,10 @@ namespace lob {
 
 class OrderBook {
 public:
+
+    explicit OrderBook(
+        std::size_t expected_orders = 0
+    );
     std::vector<Trade> add_order(
         OrderId id,
         Side side,
@@ -87,19 +92,42 @@ public:
 
 private:
     using BidBook =
-        std::map<Price, PriceLevel, std::greater<Price>>;
+        std::map<
+            Price,
+            PriceLevel,
+            std::greater<Price>
+        >;
 
     using AskBook =
         std::map<Price, PriceLevel>;
 
     using OrderIterator =
         std::list<Order>::iterator;
+
     struct OrderLocator {
         Side side{};
         Price price{};
         OrderIterator iterator;
     };
+
+    using OrderIndex =
+        std::unordered_map<OrderId, OrderLocator>;
+
+    using OrderIndexIterator =
+        OrderIndex::iterator;
+
     void rest_order(
+        OrderId id,
+        Side side,
+        Price price,
+        Quantity quantity
+    );
+
+    void cancel_order(
+        OrderIndexIterator index_it
+    );
+
+    std::vector<Trade> add_order_unchecked(
         OrderId id,
         Side side,
         Price price,
@@ -108,9 +136,7 @@ private:
 
     BidBook bids_;
     AskBook asks_;
-
-    std::unordered_map<OrderId, OrderLocator> order_index_;
-
+    OrderIndex order_index_;
     SequenceNumber next_sequence_{0};
 };
 

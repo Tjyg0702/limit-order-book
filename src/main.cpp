@@ -1,49 +1,44 @@
 #include <iostream>
 
-#include "lob/order_book.hpp"
+#include "lob/event_generator.hpp"
+#include "lob/replay_engine.hpp"
 
 int main() {
-    lob::OrderBook book;
+    lob::EventGeneratorConfig config;
 
-    book.add_order(
-        1,
-        lob::Side::Sell,
-        10050,
-        100
-    );
+    config.event_count = 100'000;
+    config.seed = 0xC0FFEE;
 
-    book.add_order(
-        2,
-        lob::Side::Sell,
-        10050,
-        100
-    );
+    const auto events =
+        lob::SyntheticEventGenerator::generate(
+            config
+        );
 
-    book.modify_order(
-        1,
-        10050,
-        150
-    );
+    lob::ReplayEngine engine;
 
-    std::cout << "Depth after modify: "
-              << book.ask_depth(10050)
-              << '\n';
+    const auto stats =
+        engine.replay(events);
 
-    const auto trades = book.add_order(
-        10,
-        lob::Side::Buy,
-        10050,
-        100
-    );
+    std::cout
+        << "Events processed: "
+        << stats.events_processed
+        << '\n';
 
-    for (const auto& trade : trades) {
-        std::cout
-            << "Maker=" << trade.maker_order_id
-            << " Taker=" << trade.taker_order_id
-            << " Price=" << trade.price
-            << " Quantity=" << trade.quantity
-            << '\n';
-    }
+    std::cout
+        << "Trades generated: "
+        << stats.trades_generated
+        << '\n';
+
+    std::cout
+        << "Resting orders: "
+        << engine.order_book().order_count()
+        << '\n';
+
+    std::cout
+        << "Book valid: "
+        << std::boolalpha
+        << engine.order_book().validate_invariants()
+        << '\n';
 
     return 0;
 }

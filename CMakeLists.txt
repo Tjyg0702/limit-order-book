@@ -12,6 +12,12 @@ option(
     OFF
 )
 
+option(
+    ENABLE_BENCHMARKS
+    "Build performance benchmarks"
+    OFF
+)
+
 function(enable_sanitizers target)
     if(ENABLE_SANITIZERS)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -40,6 +46,8 @@ endfunction()
 
 add_library(lob
     src/order_book.cpp
+    src/replay_engine.cpp
+    src/event_generator.cpp
 )
 
 target_include_directories(lob
@@ -73,6 +81,8 @@ add_executable(lob_tests
     tests/matching_test.cpp
     tests/modify_order_test.cpp
     tests/invariant_test.cpp
+    tests/replay_engine_test.cpp
+    tests/event_generator_test.cpp
 )
 
 target_link_libraries(lob_tests
@@ -88,3 +98,48 @@ gtest_discover_tests(lob_tests)
 enable_sanitizers(lob)
 enable_sanitizers(limit_order_book)
 enable_sanitizers(lob_tests)
+
+if(ENABLE_BENCHMARKS)
+    include(FetchContent)
+
+    set(
+        BENCHMARK_ENABLE_TESTING
+        OFF
+        CACHE BOOL ""
+        FORCE
+    )
+
+    FetchContent_Declare(
+        googlebenchmark
+        GIT_REPOSITORY
+            https://github.com/google/benchmark.git
+        GIT_TAG
+            v1.9.5
+    )
+
+    FetchContent_MakeAvailable(
+        googlebenchmark
+    )
+
+    add_executable(
+        lob_benchmark
+        benchmarks/replay_benchmark.cpp
+    )
+
+    target_link_libraries(
+        lob_benchmark
+        PRIVATE
+            lob
+            benchmark::benchmark
+    )
+    add_executable(
+        lob_latency
+        benchmarks/latency_benchmark.cpp
+    )
+
+    target_link_libraries(
+        lob_latency
+        PRIVATE
+            lob
+    )
+endif()

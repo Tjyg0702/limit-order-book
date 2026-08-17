@@ -1,10 +1,18 @@
 #include "lob/order_book.hpp"
 
-#include <unordered_set>
 #include <algorithm>
 #include <iterator>
+#include <unordered_set>
 
 namespace lob {
+
+OrderBook::OrderBook(
+    std::size_t expected_orders
+) {
+    if (expected_orders > 0) {
+        order_index_.reserve(expected_orders);
+    }
+}
 
 std::vector<Trade> OrderBook::add_order(
     OrderId id,
@@ -20,7 +28,23 @@ std::vector<Trade> OrderBook::add_order(
         return {};
     }
 
+    return add_order_unchecked(
+        id,
+        side,
+        price,
+        quantity
+    );
+}
+
+std::vector<Trade> OrderBook::add_order_unchecked(
+    OrderId id,
+    Side side,
+    Price price,
+    Quantity quantity
+) {
     std::vector<Trade> trades;
+    trades.reserve(4);
+
     Quantity remaining = quantity;
 
     if (side == Side::Buy) {
@@ -129,6 +153,221 @@ std::vector<Trade> OrderBook::add_order(
     return trades;
 }
 
+bool OrderBook::cancel_order(OrderId id) {
+    const auto index_it =
+        order_index_.find(id);
+
+    if (index_it == order_index_.end()) {
+        return false;
+    }
+
+    cancel_order(index_it);
+
+    return true;
+}
+
+void OrderBook::cancel_order(
+    OrderIndexIterator index_it
+) {
+    const OrderLocator locator =
+        index_it->second;
+
+    if (locator.side == Side::Buy) {
+        auto level_it =
+            bids_.find(locator.price);
+
+        if (level_it != bids_.end()) {
+            auto& level =
+                level_it->second;
+
+            level.total_quantity -=
+                locator.iterator->remaining_quantity;
+
+            level.orders.erase(
+                locator.iterator
+            );
+
+            if (level.orders.empty()) {
+                bids_.erase(level_it);
+            }
+        }
+    } else {
+        auto level_it =
+            asks_.find(locator.price);
+
+        if (level_it != asks_.end()) {
+            auto& level =
+                level_it->second;
+
+            level.total_quantity -=
+                locator.iterator->remaining_quantity;
+
+            level.orders.erase(
+                locator.iterator
+            );
+
+            if (level.orders.empty()) {
+                asks_.erase(level_it);
+            }
+        }
+    }
+
+    order_index_.erase(index_it);
+}
+
+std::vector<Trade> OrderBook::modify_order(
+    OrderId id,
+    Price new_price,
+    Quantity new_quantity
+) {
+    const auto index_it =
+        order_index_.find(id);
+
+    if (index_it == order_index_.end()) {
+        return {};
+    }
+
+    if (new_price <= 0) {
+        return {};
+    }
+
+    if (new_quantity == 0) {
+        cancel_order(index_it);
+        return {};
+    }
+
+    const OrderLocator locator =
+        index_it->second;
+
+    const Quantity current_quantity =
+        locator.iterator->remaining_quantity;
+
+    // Same price and quantity decrease:
+    // preserve the order's time priority.
+    if (
+        new_price == locator.price &&
+        new_quantity <= current_quantity
+    ) {
+        const Quantity quantity_reduction =
+            current_quantity - new_quantity;
+
+        if (locator.side == Side::Buy) {
+            auto level_it =
+                bids_.find(locator.price);
+
+            if (level_it == bids_.end()) {
+                return {};
+            }
+
+            level_it->second.total_quantity -=
+                quantity_reduction;
+        } else {
+            auto level_it =
+                asks_.find(locator.price);
+
+            if (level_it == asks_.end()) {
+                return {};
+            }
+
+            level_it->second.total_quantity -=
+                quantity_reduction;
+        }
+
+        locator.iterator->remaining_quantity =
+            new_quantity;
+
+        return {};
+    }
+
+    // Price change or quantity increase:
+    // cancel + replace, so time priority is lost.
+    const Side side =
+        locator.side;
+
+    cancel_order(index_it);
+
+    return add_order_unchecked(
+        id,
+        side,
+        new_price,
+        new_quantity
+    );
+}
+
+void OrderBook::rest_order(
+    OrderId id,
+    Side side,
+    Price price,
+    Quantity quantity
+) {
+    const SequenceNumber sequence =
+        ++next_sequence_;
+
+    Order order{
+        .id = id,
+        .side = side,
+        .price = price,
+        .remaining_quantity = quantity,
+        .sequence = sequence
+    };
+
+    if (side == Side::Buy) {
+        auto [level_it, inserted] =
+            bids_.try_emplace(
+                price,
+                PriceLevel{
+                    .price = price
+                }
+            );
+
+        auto& level =
+            level_it->second;
+
+        level.orders.push_back(order);
+        level.total_quantity += quantity;
+
+        auto order_it =
+            std::prev(level.orders.end());
+
+        order_index_.emplace(
+            id,
+            OrderLocator{
+                .side = side,
+                .price = price,
+                .iterator = order_it
+            }
+        );
+
+        return;
+    }
+
+    auto [level_it, inserted] =
+        asks_.try_emplace(
+            price,
+            PriceLevel{
+                .price = price
+            }
+        );
+
+    auto& level =
+        level_it->second;
+
+    level.orders.push_back(order);
+    level.total_quantity += quantity;
+
+    auto order_it =
+        std::prev(level.orders.end());
+
+    order_index_.emplace(
+        id,
+        OrderLocator{
+            .side = side,
+            .price = price,
+            .iterator = order_it
+        }
+    );
+}
+
 bool OrderBook::validate_invariants() const {
     std::size_t counted_orders = 0;
     std::unordered_set<OrderId> seen_ids;
@@ -136,7 +375,7 @@ bool OrderBook::validate_invariants() const {
     auto validate_side =
         [&](const auto& book, Side expected_side) {
             for (const auto& [price, level] : book) {
-                // Empty price levels must never remain in the book.
+                // Empty price levels must never remain.
                 if (level.orders.empty()) {
                     return false;
                 }
@@ -156,7 +395,8 @@ bool OrderBook::validate_invariants() const {
                     order_it != level.orders.end();
                     ++order_it
                 ) {
-                    const auto& order = *order_it;
+                    const auto& order =
+                        *order_it;
 
                     if (order.side != expected_side) {
                         return false;
@@ -170,8 +410,8 @@ bool OrderBook::validate_invariants() const {
                         return false;
                     }
 
-                    // FIFO order should correspond to increasing
-                    // sequence numbers.
+                    // FIFO order should have strictly
+                    // increasing sequence numbers.
                     if (
                         !first_order &&
                         order.sequence <= previous_sequence
@@ -179,7 +419,9 @@ bool OrderBook::validate_invariants() const {
                         return false;
                     }
 
-                    previous_sequence = order.sequence;
+                    previous_sequence =
+                        order.sequence;
+
                     first_order = false;
 
                     // No duplicate resting OrderIds.
@@ -234,13 +476,13 @@ bool OrderBook::validate_invariants() const {
         return false;
     }
 
-    // Every resting order must have exactly one index entry.
+    // Every resting order must have exactly
+    // one index entry.
     if (counted_orders != order_index_.size()) {
         return false;
     }
 
-    // After matching finishes, the resting book must never
-    // remain crossed.
+    // The resting book must never remain crossed.
     if (!bids_.empty() && !asks_.empty()) {
         if (
             bids_.begin()->first >=
@@ -251,196 +493,6 @@ bool OrderBook::validate_invariants() const {
     }
 
     return true;
-}
-
-bool OrderBook::cancel_order(OrderId id) {
-    const auto index_it = order_index_.find(id);
-
-    if (index_it == order_index_.end()) {
-        return false;
-    }
-
-    const OrderLocator locator = index_it->second;
-
-    if (locator.side == Side::Buy) {
-        auto level_it = bids_.find(locator.price);
-
-        if (level_it == bids_.end()) {
-            return false;
-        }
-
-        auto& level = level_it->second;
-
-        level.total_quantity -=
-            locator.iterator->remaining_quantity;
-
-        level.orders.erase(locator.iterator);
-
-        if (level.orders.empty()) {
-            bids_.erase(level_it);
-        }
-    } else {
-        auto level_it = asks_.find(locator.price);
-
-        if (level_it == asks_.end()) {
-            return false;
-        }
-
-        auto& level = level_it->second;
-
-        level.total_quantity -=
-            locator.iterator->remaining_quantity;
-
-        level.orders.erase(locator.iterator);
-
-        if (level.orders.empty()) {
-            asks_.erase(level_it);
-        }
-    }
-
-    order_index_.erase(index_it);
-
-    return true;
-}
-
-std::vector<Trade> OrderBook::modify_order(
-    OrderId id,
-    Price new_price,
-    Quantity new_quantity
-) {
-    const auto index_it = order_index_.find(id);
-
-    if (index_it == order_index_.end()) {
-        return {};
-    }
-
-    if (new_price <= 0) {
-        return {};
-    }
-
-    if (new_quantity == 0) {
-        cancel_order(id);
-        return {};
-    }
-
-    const OrderLocator locator = index_it->second;
-    const Quantity current_quantity =
-        locator.iterator->remaining_quantity;
-
-    if (
-        new_price == locator.price &&
-        new_quantity <= current_quantity
-    ) {
-        const Quantity quantity_reduction =
-            current_quantity - new_quantity;
-
-        if (locator.side == Side::Buy) {
-            auto level_it = bids_.find(locator.price);
-
-            if (level_it == bids_.end()) {
-                return {};
-            }
-
-            level_it->second.total_quantity -=
-                quantity_reduction;
-        } else {
-            auto level_it = asks_.find(locator.price);
-
-            if (level_it == asks_.end()) {
-                return {};
-            }
-
-            level_it->second.total_quantity -=
-                quantity_reduction;
-        }
-
-        locator.iterator->remaining_quantity =
-            new_quantity;
-
-        return {};
-    }
-
-    const Side side = locator.side;
-
-    if (!cancel_order(id)) {
-        return {};
-    }
-
-    return add_order(
-        id,
-        side,
-        new_price,
-        new_quantity
-    );
-}
-
-void OrderBook::rest_order(
-    OrderId id,
-    Side side,
-    Price price,
-    Quantity quantity
-) {
-    const SequenceNumber sequence = ++next_sequence_;
-
-    Order order{
-        .id = id,
-        .side = side,
-        .price = price,
-        .remaining_quantity = quantity,
-        .sequence = sequence
-    };
-
-    if (side == Side::Buy) {
-        auto [level_it, inserted] =
-            bids_.try_emplace(
-                price,
-                PriceLevel{
-                    .price = price
-                }
-            );
-
-        auto& level = level_it->second;
-
-        level.orders.push_back(order);
-        level.total_quantity += quantity;
-
-        auto order_it = std::prev(level.orders.end());
-
-        order_index_.emplace(
-            id,
-            OrderLocator{
-                .side = side,
-                .price = price,
-                .iterator = order_it
-            }
-        );
-
-        return;
-    }
-
-    auto [level_it, inserted] =
-        asks_.try_emplace(
-            price,
-            PriceLevel{
-                .price = price
-            }
-        );
-
-    auto& level = level_it->second;
-
-    level.orders.push_back(order);
-    level.total_quantity += quantity;
-
-    auto order_it = std::prev(level.orders.end());
-
-    order_index_.emplace(
-        id,
-        OrderLocator{
-            .side = side,
-            .price = price,
-            .iterator = order_it
-        }
-    );
 }
 
 } // namespace lob

@@ -32,3 +32,11 @@
 *.app
 build/
 build-asan/
+
+# Performance builds
+build-bench/
+build-profile/
+
+# Linux perf output
+perf.data
+perf.data.old
